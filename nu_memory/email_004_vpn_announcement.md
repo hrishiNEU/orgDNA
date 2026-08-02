@@ -1,0 +1,5 @@
+# Email: Campus announcement — GlobalProtect is the university VPN
+
+**From:** Information Technology Services · **To:** All faculty and staff · *(Simulated email for demo purposes)* · **Subject:** Action required: set up GlobalProtect for off-campus access
+
+Following the network architecture review, GlobalProtect is now the university's single VPN for secure off-campus access to protected NUnet resources. What you need to do: (1) enroll in multi-factor authentication if you have not already — the VPN requires it; (2) go to vpn.northeastern.edu, sign in with your Northeastern credentials, and install the GlobalProtect client for your device; (3) connect whenever you need protected university systems from off campus. Note that everyday cloud services such as Microsoft 365 do not require the VPN. Faculty and staff are required to use GlobalProtect for protected resources; students are strongly encouraged. Step-by-step guides are in the Tech Service Portal, and the Service Desk can help 24/7 at 617-373-4357. Decision record: DEC-VPN-01.
