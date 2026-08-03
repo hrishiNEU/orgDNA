@@ -4,12 +4,13 @@ OrgDNA MVP — Enterprise Memory Platform demo
 Two workspaces:
   1. Northeastern ITS — real public knowledge base (10 docs)
   2. NU Decision Archive (simulated) — mock Teams threads, emails, meeting
-     minutes, and decision records in the university's voice, demonstrating
-     how OrgDNA unifies memory across the tools an organization already uses.
+     minutes, and decision records in the university's voice.
 
 Pipeline: TF-IDF retrieval (title+section enriched) -> optional live
 site:northeastern.edu fallback (serper.dev, ITS workspace only) ->
-grounded answer composed by Groq Llama 3.3 (free) with per-channel citations.
+grounded answer composed by Groq Llama 3.3 with SOURCE ATTRIBUTION:
+every answer is tagged as coming from internal documents, the internet,
+or both.
 """
 
 import os
@@ -101,6 +102,8 @@ div[data-testid="stHorizontalBlock"] button:hover {
 .src-local { background: #E8EEFC; color: #1E2761; }
 .src-web   { background: #E6F6F0; color: #0B6E4F; }
 .src-ai    { background: #FDF1E7; color: #9A5B13; }
+.src-internal { background: #1E2761; color: #FFFFFF; }
+.src-internet { background: #0B6E4F; color: #FFFFFF; }
 section[data-testid="stSidebar"] { background: #F7F9FE; }
 section[data-testid="stSidebar"] .kb-item {
     font-size: .8rem; color: #3A4256; padding: .28rem .6rem;
@@ -133,8 +136,6 @@ def channel_of(filename: str) -> str:
 
 @st.cache_resource(show_spinner="Indexing organizational memory...")
 def build_index(kb_dir_str: str):
-    """Chunk the KB. Each chunk is indexed WITH its doc title and section
-    header so questions match even when phrased differently than the text."""
     kb_dir = Path(kb_dir_str)
     display, indexed, sources, titles, channels = [], [], [], [], []
     for f in sorted(kb_dir.glob("*.md")):
@@ -194,8 +195,6 @@ def serper_search(question: str, num: int = 3):
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_full_paragraphs(url: str, question: str, max_paras: int = 3) -> str:
-    """Fetch the page behind a web result and return the FULL paragraphs
-    most relevant to the question — instead of Google's trimmed snippet."""
     try:
         r = requests.get(url, timeout=10,
                          headers={"User-Agent": "Mozilla/5.0 (OrgDNA-MVP)"})
@@ -220,13 +219,16 @@ def fetch_full_paragraphs(url: str, question: str, max_paras: int = 3) -> str:
 
 # ------------------------- Groq answer generation ------------------------- #
 
-def groq_answer(question: str, hits: list, history: list, workspace: str) -> str | None:
-    """Compose a grounded answer with Groq's free Llama 3.3 70B."""
+def groq_answer(question: str, hits: list, history: list, workspace: str):
+    """Compose a grounded answer with Groq. Returns (text, origin) where
+    origin is 'internal', 'web', 'mixed', or 'none' — the model declares
+    which sources it actually used, and the app renders the matching tag."""
     key = get_secret("GROQ_API_KEY")
     if not key:
-        return None
+        return None, None
     context = "\n\n---\n\n".join(
-        f"[SOURCE TYPE: {CHANNEL_ICONS.get(h['channel'], h['channel'])} | "
+        f"[{'INTERNET SOURCE' if h['kind'] == 'web' else 'INTERNAL DOCUMENT'} | "
+        f"{CHANNEL_ICONS.get(h['channel'], h['channel'])} | "
         f"{h['title']} | {h['source']}]\n{h['chunk']}"
         for h in hits
     )
@@ -255,11 +257,18 @@ def groq_answer(question: str, hits: list, history: list, workspace: str) -> str
         f"{persona}\nRules:\n"
         "1. Answer ONLY from the provided context. Never invent names, "
         "dates, numbers, URLs, or policies.\n"
-        "2. Be direct: give the answer first, then supporting detail in "
+        "2. Context passages are labeled INTERNAL DOCUMENT or INTERNET "
+        "SOURCE. Your VERY FIRST line must be exactly one of:\n"
+        "   SOURCE: INTERNAL   (answer uses only internal documents)\n"
+        "   SOURCE: WEB        (answer uses only internet sources)\n"
+        "   SOURCE: MIXED      (answer uses both)\n"
+        "   SOURCE: NONE       (context cannot answer the question)\n"
+        "   Then a blank line, then the answer.\n"
+        "3. Be direct: give the answer first, then supporting detail in "
         "short paragraphs or a brief list.\n"
-        "3. Synthesize across passages when several are relevant.\n"
-        f"4. {fallback}\n"
-        "5. Keep answers under ~170 words. No preamble."
+        "4. Synthesize across passages when several are relevant.\n"
+        f"5. {fallback}\n"
+        "6. Keep answers under ~170 words. No preamble."
     )
     user = (f"Earlier questions in this conversation:\n{convo}\n\n"
             f"CONTEXT:\n{context}\n\nQUESTION: {question}")
@@ -271,13 +280,33 @@ def groq_answer(question: str, hits: list, history: list, workspace: str) -> str
             json={"model": GROQ_MODEL,
                   "messages": [{"role": "system", "content": system},
                                {"role": "user", "content": user}],
-                  "temperature": 0.2, "max_tokens": 550},
+                  "temperature": 0.2, "max_tokens": 600},
             timeout=30,
         )
         r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"].strip()
+        text = r.json()["choices"][0]["message"]["content"].strip()
+        origin = None
+        m = re.match(r"^SOURCE:\s*(INTERNAL|WEB|MIXED|NONE)\s*\n+", text,
+                     re.IGNORECASE)
+        if m:
+            origin = m.group(1).lower()
+            text = text[m.end():].strip()
+        return text, origin
     except Exception:
-        return None
+        return None, None
+
+
+def origin_badge(origin: str, has_web_hits: bool) -> str:
+    """Render the provenance tag. Falls back to a deterministic guess if
+    the model didn't declare one."""
+    if origin is None:                       # model skipped the marker
+        origin = "web" if has_web_hits else "internal"
+    if origin == "internal" or origin == "none":
+        return "<span class='src-badge src-internal'>🏢 From internal documents</span>"
+    if origin == "web":
+        return "<span class='src-badge src-internet'>🌐 Sourced from the internet</span>"
+    return ("<span class='src-badge src-internal'>🏢 From internal documents</span>"
+            "<span class='src-badge src-internet'>🌐 + internet</span>")
 
 
 # ------------------------------ Sidebar ----------------------------------- #
@@ -285,8 +314,7 @@ def groq_answer(question: str, hits: list, history: list, workspace: str) -> str
 with st.sidebar:
     st.markdown("## 🧬 OrgDNA")
     st.caption("Enterprise Memory Platform · MVP")
-    ws_name = st.radio("**Workspace**", list(WORKSPACES.keys()),
-                       captions=[w["desc"] for w in WORKSPACES.values()])
+    ws_name = st.session_state.get("ws_choice", list(WORKSPACES.keys())[0])
     ws = WORKSPACES[ws_name]
     if not ws["dir"].exists() or not list(ws["dir"].glob("*.md")):
         st.error(f"No documents found in `{ws['dir'].name}/`. "
@@ -324,6 +352,13 @@ with st.sidebar:
 
 # ------------------------------- Header ----------------------------------- #
 
+st.radio("**Workspace**", list(WORKSPACES.keys()), horizontal=True,
+         key="ws_choice",
+         captions=[w["desc"] for w in WORKSPACES.values()])
+ws_name = st.session_state["ws_choice"]
+ws = WORKSPACES[ws_name]
+serper_on = bool(get_secret("SERPER_API_KEY")) and ws["web_fallback"]
+
 hero_sub = ("Ask your organization anything. This demo remembers Northeastern's "
             "IT Services knowledge — laptops, Wi-Fi, VPN, phishing, and more."
             if "Northeastern ITS" == ws_name else
@@ -338,6 +373,7 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
+files = sorted(ws["dir"].glob("*.md"))
 _, _, chunks_all, _, _, channels_all = build_index(str(ws["dir"]))
 n_channels = len(set(channels_all))
 n_msgs = len([m for m in st.session_state.get("messages", []) if m["role"] == "user"])
@@ -398,24 +434,31 @@ if question:
                          "It may predate what's been ingested so far."))
             st.markdown(answer)
         else:
-            ai_text = None
-            if groq_on:
+            groq_on_now = bool(get_secret("GROQ_API_KEY"))
+            ai_text, origin = (None, None)
+            if groq_on_now:
                 with st.spinner("Composing answer from organizational memory..."):
-                    ai_text = groq_answer(question, hits,
-                                          st.session_state.messages, ws_name)
+                    ai_text, origin = groq_answer(question, hits,
+                                                  st.session_state.messages,
+                                                  ws_name)
             used_channels = {h["channel"] for h in hits[:4] if h["kind"] == "local"}
-            badges = "".join(
+            channel_badges = "".join(
                 f"<span class='src-badge src-local'>{CHANNEL_ICONS[c]}</span>"
                 for c in sorted(used_channels))
-            if used_web:
-                badges += "<span class='src-badge src-web'>🌐 Live web</span>"
             if ai_text:
+                badges = origin_badge(origin, used_web)
+                if origin in (None, "internal", "mixed", "none"):
+                    badges += channel_badges
                 badges += "<span class='src-badge src-ai'>✨ AI-composed</span>"
                 answer = f"{badges}<br><br>{ai_text}"
             else:
                 # extractive fallback (no Groq key or API error)
                 best = hits[0] if (local_is_good or not used_web) else \
                        next((h for h in hits if h["kind"] == "web"), hits[0])
+                if best["kind"] == "web":
+                    badges = origin_badge("web", True)
+                else:
+                    badges = origin_badge("internal", False) + channel_badges
                 answer = f"{badges}<br><br>{best['chunk']}"
                 if best["kind"] == "web":
                     answer += (f"<br><br><small>Source: "
